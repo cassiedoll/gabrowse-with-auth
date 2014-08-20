@@ -1,9 +1,11 @@
 .gitignore
 .project
 .pydevproject
+.idea
 .settings
 google_api_key.txt
 static/js/d3.js
 *.pyc
 *~
 .idea
+client_secrets.json

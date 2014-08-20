@@ -28,6 +28,9 @@ import re
 import socket
 import webapp2
 
+from oauth2client import appengine
+from google.appengine.api import users
+
 socket.setdefaulttimeout(60)
 http = httplib2.Http(timeout=60)
 
@@ -36,33 +39,27 @@ JINJA_ENVIRONMENT = jinja2.Environment(
     autoescape=True,
     extensions=['jinja2.ext.autoescape'])
 
+client_secrets = os.path.join(os.path.dirname(__file__), 'client_secrets.json')
+decorator = appengine.oauth2decorator_from_clientsecrets(
+      client_secrets,
+      scope=[
+        'https://www.googleapis.com/auth/genomics',
+      ])
 
 # TODO: Dataset information should come from the list datasets api call
 # But that call is not in the GA4GH API yet
 SUPPORTED_BACKENDS = {
-  'Ensembl' : {'name': 'Ensembl',
-            'url': 'http://193.62.52.232:8081/%s?%s',
-            'datasets': {'1000 genomes pilot 2': '2'}}
-}
-
-# Google requires a valid API key.  If the file 'google_api_key.txt' exists
-# then the Google API will be enabled.
-google_api_key_file = os.path.join(os.path.dirname(__file__), 'google_api_key.txt')
-if os.path.isfile(google_api_key_file):
-  with open(google_api_key_file, 'r') as file:
-    api_key = file.readline().strip()
-    SUPPORTED_BACKENDS['GOOGLE'] = {
-      'name': 'Google',
-      'url': 'https://www.googleapis.com/genomics/v1beta2/%s?key='
-             + api_key + '&%s',
-      'supportsPartialResponse': True,
-      'datasets': {'1000 Genomes': '10473108253681171589',
+  'GOOGLE' : {
+    'name': 'Google',
+    'url': 'https://www.googleapis.com/genomics/v1beta2/%s?%s',
+    'supportsPartialResponse': True,
+    'datasets': {'1000 Genomes': '10473108253681171589',
                    'Platinum Genomes': '3049512673186936334',
                    'DREAM SMC Challenge': '337315832689',
                    'PGP': '383928317087',
                    'Simons Foundation' : '461916304629'}
-    }
-
+  }
+}
 
 class ApiException(Exception):
   pass
@@ -99,6 +96,7 @@ class BaseRequestHandler(webapp2.RequestHandler):
     return SUPPORTED_BACKENDS[self.get_backend()]['url']
 
   def get_content(self, path, method='POST', body=None, params=''):
+    http = decorator.http()
     uri= self.get_base_api_url() % (path, params)
     startTime = time.clock()
     response, content = http.request(
@@ -129,7 +127,7 @@ class BaseRequestHandler(webapp2.RequestHandler):
   def write_response(self, content):
     self.response.headers['Content-Type'] = "application/json"
     self.response.write(json.dumps(content))
-    
+
   def write_content(self, path, method='POST', body=None, params=''):
     self.write_response(self.get_content(path, method, body, params))
 
@@ -185,6 +183,8 @@ class SetSearchHandler(BaseRequestHandler):
                          for b in variant_set['referenceBounds']]
     self.response.write(json.dumps(set))
 
+
+  @decorator.oauth_aware
   def get(self):
     use_callsets = self.request.get('setType') == 'CALLSET'
     set_id = self.request.get('setId')
@@ -208,6 +208,7 @@ class SetSearchHandler(BaseRequestHandler):
 
 class ReadSearchHandler(BaseRequestHandler):
 
+  @decorator.oauth_aware
   def get(self):
     body = {
       'readGroupSetIds': self.request.get('setIds').split(','),
@@ -234,12 +235,13 @@ class ReadSearchHandler(BaseRequestHandler):
         return { key: dict[key] for key in keys }
       newReads = [ filterKeys(read, fields) for read in content['alignments']]
       content['alignments'] = newReads
-      
+
     self.write_response(content)
 
 
 class VariantSearchHandler(BaseRequestHandler):
 
+  @decorator.oauth_aware
   def get(self):
     body = {
       'callSetIds': self.request.get('setIds').split(','),
@@ -336,11 +338,20 @@ class AlleleSearchHandler(BaseSnpediaHandler):
 
 class MainHandler(webapp2.RequestHandler):
 
+  @decorator.oauth_aware
   def get(self):
-    template = JINJA_ENVIRONMENT.get_template('main.html')
-    self.response.write(template.render({
-      'backends': SUPPORTED_BACKENDS,
-    }))
+    if decorator.has_credentials():
+      template = JINJA_ENVIRONMENT.get_template('main.html')
+      self.response.write(template.render({
+        'backends': SUPPORTED_BACKENDS,
+        'username': users.User().nickname(),
+        'logout_url': users.create_logout_url('/'),
+      }))
+    else:
+      template = JINJA_ENVIRONMENT.get_template('grantaccess.html')
+      self.response.write(template.render({
+        'url': decorator.authorize_url()
+      }))
 
 web_app = webapp2.WSGIApplication(
     [
@@ -350,5 +361,6 @@ web_app = webapp2.WSGIApplication(
      ('/api/sets', SetSearchHandler),
      ('/api/snps', SnpSearchHandler),
      ('/api/alleles', AlleleSearchHandler),
+     (decorator.callback_path, decorator.callback_handler()),
     ],
     debug=True)
